@@ -7,24 +7,22 @@
     easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
     smooth: true,
   });
-
   lenis.on("scroll", ScrollTrigger.update);
   gsap.ticker.add((time) => lenis.raf(time * 1000));
   gsap.ticker.lagSmoothing(0);
 
-  // ─── Three.js Setup ─────────────────────────────────────────
+  // ─── Renderer ───────────────────────────────────────────────
   const canvas = document.getElementById("webgl");
+  const dpr = Math.min(window.devicePixelRatio, 2);
+
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
-    alpha: true,
-    stencil: true,
+    alpha: false,
   });
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setClearColor(0x000000, 0);
-
-  const scene = new THREE.Scene();
+  renderer.setPixelRatio(dpr);
+  renderer.setClearColor(0xffffff, 1);
 
   const camera = new THREE.PerspectiveCamera(
     45,
@@ -33,10 +31,26 @@
     100
   );
   camera.position.set(0, 0, 5);
-  scene.add(camera);
+
+  // ─── Render target (offscreen buffer for background pass) ──
+  var rtW = Math.floor(window.innerWidth * dpr);
+  var rtH = Math.floor(window.innerHeight * dpr);
+
+  var renderTarget = new THREE.WebGLRenderTarget(rtW, rtH, {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat,
+  });
+
+  // ─── Two scenes: background (video) & main (glass hex) ─────
+  var bgScene = new THREE.Scene();
+  bgScene.background = new THREE.Color(0xffffff);
+
+  var mainScene = new THREE.Scene();
+  mainScene.background = new THREE.Color(0xffffff);
 
   // ─── Video Texture ──────────────────────────────────────────
-  const video = document.createElement("video");
+  var video = document.createElement("video");
   video.src = "video/Exein_3D_Texture_White.mp4";
   video.crossOrigin = "anonymous";
   video.loop = true;
@@ -44,141 +58,136 @@
   video.playsInline = true;
   video.autoplay = true;
   video.play().catch(function () {
-    document.addEventListener("click", function () { video.play(); }, { once: true });
+    document.addEventListener(
+      "click",
+      function () {
+        video.play();
+      },
+      { once: true }
+    );
   });
 
-  const videoTexture = new THREE.VideoTexture(video);
+  var videoTexture = new THREE.VideoTexture(video);
   videoTexture.minFilter = THREE.LinearFilter;
   videoTexture.magFilter = THREE.LinearFilter;
   videoTexture.format = THREE.RGBAFormat;
-  videoTexture.encoding = THREE.sRGBEncoding;
 
-  // ─── Hexagonal Prism Geometry ───────────────────────────────
+  // ─── Video Plane (bgScene) ─────────────────────────────────
+  // Smaller than the hex so the content has breathing room
+  // inside the glass — white shows around the edges.
   var hexRadius = 1.0;
   var hexDepth = 1.0;
+  var videoPlaneDim = hexRadius * 1.5;
+
+  var videoPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(videoPlaneDim, videoPlaneDim),
+    new THREE.MeshBasicMaterial({ map: videoTexture })
+  );
+  videoPlane.frustumCulled = false;
+  bgScene.add(videoPlane);
+
+  // ─── Hexagonal Prism ───────────────────────────────────────
   var hexGeo = new THREE.CylinderGeometry(hexRadius, hexRadius, hexDepth, 6);
   hexGeo.rotateX(Math.PI / 2);
 
-  // Max projected extent of the hex at any rotation ≈ space diagonal
-  // = sqrt((2r)^2 + depth^2) ≈ sqrt(4 + 1) ≈ 2.24
-  // Video plane sized just above that so it always covers the mask.
-  var videoPlaneSize = 2.4;
-
-  // ═══════════════════════════════════════════════════════════
-  // PASS 1 — Stencil hexagon: invisible, writes 1 to stencil
-  // ═══════════════════════════════════════════════════════════
-  var stencilMat = new THREE.MeshBasicMaterial();
-  stencilMat.colorWrite = false;
-  stencilMat.depthWrite = false;
-  stencilMat.stencilWrite = true;
-  stencilMat.stencilRef = 1;
-  stencilMat.stencilFunc = THREE.AlwaysStencilFunc;
-  stencilMat.stencilZPass = THREE.ReplaceStencilOp;
-  stencilMat.stencilFail = THREE.KeepStencilOp;
-  stencilMat.stencilZFail = THREE.KeepStencilOp;
-
-  var stencilHex = new THREE.Mesh(hexGeo, stencilMat);
-  stencilHex.renderOrder = 0;
-
-  // ═══════════════════════════════════════════════════════════
-  // PASS 2 — Video plane: billboard quad, masked by stencil.
-  // Sized to tightly cover the hexagon's max projected extent
-  // so the video fills the shape without being zoomed in.
-  // ═══════════════════════════════════════════════════════════
-  var videoMat = new THREE.MeshBasicMaterial({ map: videoTexture });
-  videoMat.depthTest = false;
-  videoMat.depthWrite = false;
-  videoMat.stencilWrite = true;
-  videoMat.stencilRef = 1;
-  videoMat.stencilFunc = THREE.EqualStencilFunc;
-  videoMat.stencilFail = THREE.KeepStencilOp;
-  videoMat.stencilZFail = THREE.KeepStencilOp;
-  videoMat.stencilZPass = THREE.KeepStencilOp;
-
-  var videoPlane = new THREE.Mesh(
-    new THREE.PlaneGeometry(videoPlaneSize, videoPlaneSize),
-    videoMat
-  );
-  videoPlane.renderOrder = 1;
-  videoPlane.frustumCulled = false;
-
-  // ═══════════════════════════════════════════════════════════
-  // PASS 3 — Glass hexagon: fresnel reflections + specular
-  // ═══════════════════════════════════════════════════════════
+  // ─── Glass Refraction Shader ────────────────────────────────
   var glassVert = [
     "varying vec3 vNormal;",
     "varying vec3 vViewDir;",
+    "varying vec3 vWorldNormal;",
+    "",
     "void main() {",
     "  vec4 wp = modelMatrix * vec4(position, 1.0);",
-    "  vNormal = normalize(mat3(modelMatrix) * normal);",
-    "  vViewDir = normalize(cameraPosition - wp.xyz);",
-    "  gl_Position = projectionMatrix * viewMatrix * wp;",
+    "  vNormal      = normalize(normalMatrix * normal);",
+    "  vWorldNormal  = normalize(mat3(modelMatrix) * normal);",
+    "  vViewDir      = normalize(cameraPosition - wp.xyz);",
+    "  gl_Position   = projectionMatrix * viewMatrix * wp;",
     "}",
   ].join("\n");
 
   var glassFrag = [
+    "uniform sampler2D uBackground;",
+    "uniform vec2      uResolution;",
+    "",
     "varying vec3 vNormal;",
     "varying vec3 vViewDir;",
+    "varying vec3 vWorldNormal;",
+    "",
     "void main() {",
-    "  vec3 n = normalize(vNormal);",
-    "  vec3 v = normalize(vViewDir);",
+    "  vec2 uv = gl_FragCoord.xy / uResolution;",
     "",
-    "  float fresnel = pow(1.0 - abs(dot(v, n)), 3.0);",
+    "  vec3 n  = normalize(vNormal);",
+    "  vec3 v  = normalize(vViewDir);",
+    "  vec3 wn = normalize(vWorldNormal);",
     "",
-    "  vec3 r = reflect(-v, n);",
+    "  // ── IOR refraction ──",
+    "  float ior = 1.45;",
+    "  vec3 refr = refract(-v, n, 1.0 / ior);",
+    "  vec2 off  = refr.xy * 0.10;",
+    "",
+    "  // ── Chromatic aberration ──",
+    "  float ca = 0.012;",
+    "  vec3 col;",
+    "  col.r = texture2D(uBackground, uv + off * (1.0 + ca)).r;",
+    "  col.g = texture2D(uBackground, uv + off           ).g;",
+    "  col.b = texture2D(uBackground, uv + off * (1.0 - ca)).b;",
+    "",
+    "  // ── Fresnel ──",
+    "  float fresnel = pow(1.0 - abs(dot(v, n)), 4.0);",
+    "",
+    "  // ── Specular highlights (two lights) ──",
+    "  vec3  l1 = normalize(vec3( 1.0, 1.5, 2.0));",
+    "  vec3  l2 = normalize(vec3(-1.0, 0.5, 1.5));",
+    "  float s1 = pow(max(dot(n, normalize(v + l1)), 0.0), 200.0);",
+    "  float s2 = pow(max(dot(n, normalize(v + l2)), 0.0), 100.0);",
+    "",
+    "  // ── Fake environment reflection ──",
+    "  vec3  r       = reflect(-v, wn);",
     "  float envGrad = r.y * 0.5 + 0.5;",
-    "  vec3 env = mix(vec3(0.01, 0.01, 0.04), vec3(0.10, 0.12, 0.20), envGrad);",
+    "  vec3  env     = mix(vec3(0.92, 0.92, 0.95), vec3(1.0), envGrad);",
     "",
-    "  vec3 l1 = normalize(vec3(1.0, 1.0, 2.0));",
-    "  vec3 l2 = normalize(vec3(-1.0, 0.5, 1.0));",
-    "  float s1 = pow(max(dot(n, normalize(v + l1)), 0.0), 128.0);",
-    "  float s2 = pow(max(dot(n, normalize(v + l2)), 0.0), 64.0);",
+    "  // ── Compose ──",
+    "  col  = mix(col, env, fresnel * 0.18);",
+    "  col += vec3(1.0) * (s1 * 0.45 + s2 * 0.2);",
+    "  col *= mix(1.0, 0.97, fresnel);",
     "",
-    "  vec3 col = env * fresnel + vec3(1.0) * (s1 * 0.7 + s2 * 0.35);",
-    "  col += vec3(0.35, 0.45, 0.65) * smoothstep(0.0, 0.4, fresnel) * 0.1;",
-    "",
-    "  float alpha = fresnel * 0.2 + (s1 + s2) * 0.4;",
-    "  alpha = clamp(alpha, 0.0, 0.75);",
-    "",
-    "  gl_FragColor = vec4(col, alpha);",
+    "  gl_FragColor = vec4(col, 1.0);",
     "}",
   ].join("\n");
 
   var glassMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uBackground: { value: renderTarget.texture },
+      uResolution: { value: new THREE.Vector2(rtW, rtH) },
+    },
     vertexShader: glassVert,
     fragmentShader: glassFrag,
-    transparent: true,
-    depthWrite: false,
     side: THREE.DoubleSide,
   });
+  glassMat.polygonOffset = true;
+  glassMat.polygonOffsetFactor = 1;
+  glassMat.polygonOffsetUnits = 1;
 
   var glassHex = new THREE.Mesh(hexGeo, glassMat);
-  glassHex.renderOrder = 2;
 
-  // ═══════════════════════════════════════════════════════════
-  // PASS 4 — Wireframe edges
-  // ═══════════════════════════════════════════════════════════
+  // ─── Wireframe Edges ───────────────────────────────────────
   var edgesGeo = new THREE.EdgesGeometry(hexGeo);
   var edgesMat = new THREE.LineBasicMaterial({
-    color: 0xffffff,
+    color: 0xbbbbbb,
     transparent: true,
-    opacity: 0.25,
+    opacity: 0.35,
   });
   var wireframe = new THREE.LineSegments(edgesGeo, edgesMat);
-  wireframe.renderOrder = 3;
 
-  // ─── Assemble Scene ─────────────────────────────────────────
+  // ─── Hex Group (mainScene) ─────────────────────────────────
   var hexGroup = new THREE.Group();
-  hexGroup.add(stencilHex);
   hexGroup.add(glassHex);
   hexGroup.add(wireframe);
-  scene.add(hexGroup);
-  scene.add(videoPlane);
+  mainScene.add(hexGroup);
 
   // ─── GSAP ScrollTrigger ─────────────────────────────────────
   gsap.registerPlugin(ScrollTrigger);
 
-  // Rotation
   gsap.timeline({
     scrollTrigger: {
       trigger: ".scroll-container",
@@ -193,7 +202,6 @@
     ease: "none",
   });
 
-  // Scale
   gsap.timeline({
     scrollTrigger: {
       trigger: ".scroll-container",
@@ -207,7 +215,6 @@
     { x: 1.4, y: 1.4, z: 1.4, duration: 1, ease: "none" }
   );
 
-  // Position sway
   var tlPos = gsap.timeline({
     scrollTrigger: {
       trigger: ".scroll-container",
@@ -222,7 +229,6 @@
     .to(hexGroup.position, { x: 0.5, y: 0.8, duration: 0.25, ease: "none" }, 0.5)
     .to(hexGroup.position, { x: 0, y: 0, duration: 0.25, ease: "none" }, 0.75);
 
-  // Edge brightness pulse
   var tlEdges = gsap.timeline({
     scrollTrigger: {
       trigger: ".scroll-container",
@@ -232,13 +238,14 @@
     },
   });
   tlEdges
-    .to(edgesMat, { opacity: 0.6, duration: 0.5, ease: "none" }, 0)
-    .to(edgesMat, { opacity: 0.15, duration: 0.5, ease: "none" }, 0.5);
+    .to(edgesMat, { opacity: 0.55, duration: 0.5, ease: "none" }, 0)
+    .to(edgesMat, { opacity: 0.2, duration: 0.5, ease: "none" }, 0.5);
 
   // ─── Render Loop ────────────────────────────────────────────
   function animate() {
     requestAnimationFrame(animate);
 
+    // Billboard: video plane tracks hex position & scale, faces camera
     videoPlane.position.copy(hexGroup.position);
     videoPlane.scale.setScalar(hexGroup.scale.x);
     videoPlane.quaternion.copy(camera.quaternion);
@@ -247,15 +254,30 @@
       videoTexture.needsUpdate = true;
     }
 
-    renderer.render(scene, camera);
+    // Pass 1 — render video + white bg to offscreen target
+    renderer.setRenderTarget(renderTarget);
+    renderer.render(bgScene, camera);
+
+    // Pass 2 — render glass hex (samples from pass 1) to screen
+    renderer.setRenderTarget(null);
+    renderer.render(mainScene, camera);
   }
   animate();
 
   // ─── Resize ─────────────────────────────────────────────────
   window.addEventListener("resize", function () {
-    camera.aspect = window.innerWidth / window.innerHeight;
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    var d = Math.min(window.devicePixelRatio, 2);
+
+    camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(d);
+
+    var nw = Math.floor(w * d);
+    var nh = Math.floor(h * d);
+    renderTarget.setSize(nw, nh);
+    glassMat.uniforms.uResolution.value.set(nw, nh);
   });
 })();

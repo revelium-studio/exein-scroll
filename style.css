@@ -9,8 +9,8 @@
 html,
 body {
   overscroll-behavior: none;
-  background: #000;
-  color: #fff;
+  background: #fff;
+  color: #111;
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
 
@@ -62,7 +62,8 @@ html.lenis body {
   font-weight: 300;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  opacity: 0.15;
+  opacity: 0.06;
+  color: #999;
 }
 
 .scroll-container {
