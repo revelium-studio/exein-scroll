@@ -67,11 +67,8 @@
   videoTexture.format = THREE.RGBAFormat;
 
   // ─── Video Plane (bgScene) ─────────────────────────────────
-  // Soft vignette fades to white so no hard edge is visible
-  // through the glass. Large enough to cover hex at any rotation.
-
-  var hexRadius = 0.85;
-  var hexHeight = 2.2;
+  var hexRadius = 0.9;
+  var hexHeight = 1.4;
 
   var videoVertSrc = [
     "varying vec2 vUv;",
@@ -87,7 +84,7 @@
     "void main() {",
     "  vec4 tex = texture2D(uVideo, vUv);",
     "  vec2 d = abs(vUv - 0.5) * 2.0;",
-    "  float edge = smoothstep(0.6, 1.0, max(d.x, d.y));",
+    "  float edge = smoothstep(0.55, 1.0, max(d.x, d.y));",
     "  vec3 col = mix(tex.rgb, vec3(1.0), edge);",
     "  gl_FragColor = vec4(col, 1.0);",
     "}",
@@ -100,32 +97,29 @@
   });
 
   var videoPlane = new THREE.Mesh(
-    new THREE.PlaneGeometry(4.0, 4.0),
+    new THREE.PlaneGeometry(4.5, 4.5),
     videoMat
   );
   videoPlane.frustumCulled = false;
   bgScene.add(videoPlane);
 
-  // ─── Tall Hexagonal Prism ──────────────────────────────────
-  // Vertical orientation (Y-axis), taller than wide like ref image
+  // ─── Hexagonal Prism ──────────────────────────────────────
   var hexGeo = new THREE.CylinderGeometry(hexRadius, hexRadius, hexHeight, 6);
 
-  // ─── Liquid Glass Shader (adapted from liquidGL) ───────────
-  // Uses view-space normals for screen-space UV offset,
-  // liquidGL-style bevel (pow 10), centre blend, 5-tap AA,
-  // chromatic aberration, Schlick fresnel, and animated specular.
-
+  // ─── Liquid Glass Shader ───────────────────────────────────
   var glassVertSrc = [
     "varying vec3 vViewNormal;",
     "varying vec3 vWorldNormal;",
     "varying vec3 vViewDir;",
+    "varying vec4 vClipPos;",
     "",
     "void main() {",
     "  vec4 wp       = modelMatrix * vec4(position, 1.0);",
     "  vViewNormal   = normalize(normalMatrix * normal);",
     "  vWorldNormal  = normalize(mat3(modelMatrix) * normal);",
     "  vViewDir      = normalize(cameraPosition - wp.xyz);",
-    "  gl_Position   = projectionMatrix * viewMatrix * wp;",
+    "  vClipPos      = projectionMatrix * viewMatrix * wp;",
+    "  gl_Position   = vClipPos;",
     "}",
   ].join("\n");
 
@@ -133,10 +127,12 @@
     "uniform sampler2D uBackground;",
     "uniform vec2      uResolution;",
     "uniform float     uTime;",
+    "uniform vec2      uCenter;",
     "",
     "varying vec3 vViewNormal;",
     "varying vec3 vWorldNormal;",
     "varying vec3 vViewDir;",
+    "varying vec4 vClipPos;",
     "",
     "void main() {",
     "  vec2 uv = gl_FragCoord.xy / uResolution;",
@@ -147,78 +143,83 @@
     "  Nw *= (gl_FrontFacing ? 1.0 : -1.0);",
     "  vec3 V  = normalize(vViewDir);",
     "",
-    // Edge factor (fresnel-like, 0 at centre, 1 at edge)
-    "  float cosTheta  = abs(dot(V, Nw));",
-    "  float edge      = 1.0 - cosTheta;",
+    "  float cosTheta = abs(dot(V, Nw));",
+    "  float edge     = 1.0 - cosTheta;",
     "",
-    // liquidGL-style offset: base refraction + sharp pow-10 bevel
-    "  float refraction = 0.04;",
-    "  float bevelDepth = 0.14;",
-    "  float offsetAmt  = edge * refraction + pow(edge, 10.0) * bevelDepth;",
+    // ── Distortion direction ──
+    // Normal direction in screen space (strong on side faces)
+    "  vec2 normalDir = Nv.xy;",
+    // Radial from hex center (fallback for faces pointing at camera)
+    "  vec2 radialDir = uv - uCenter;",
+    "  float radLen   = length(radialDir);",
+    "  radialDir      = radLen > 0.001 ? radialDir / radLen : vec2(0.0);",
     "",
-    // Centre blend — reduce distortion where normal faces camera
-    "  float centreBlend = smoothstep(0.08, 0.35, edge);",
-    "  offsetAmt *= centreBlend;",
+    // Blend: use normal when it has XY magnitude, radial as fallback
+    "  float nWeight = smoothstep(0.0, 0.2, length(normalDir));",
+    "  vec2 dir = mix(radialDir, normalize(normalDir + 0.001), nWeight);",
     "",
-    // Distortion direction: view-space normal projected to screen
-    "  vec2 dir = Nv.xy;",
+    // ── Offset amount ──
+    // High base so refraction is ALWAYS visible, not just at extreme edges
+    "  float refraction = 0.18;",
+    "  float bevelDepth = 0.30;",
+    "  float offsetAmt  = 0.012 + refraction * edge + bevelDepth * pow(edge, 4.0);",
     "",
-    // Chromatic aberration — stronger at edges
-    "  float ca = 0.004 + pow(edge, 5.0) * 0.025;",
+    // ── Chromatic aberration — stronger at edges ──
+    "  float ca = 0.008 + edge * edge * 0.04;",
     "",
     "  vec2 offR = dir * offsetAmt * (1.0 + ca);",
     "  vec2 offG = dir * offsetAmt;",
     "  vec2 offB = dir * offsetAmt * (1.0 - ca);",
     "",
-    // 5-tap sampling per channel (liquidGL anti-alias pattern)
+    // ── 5-tap sampling per channel (liquidGL pattern) ──
     "  vec2 tx = 1.0 / uResolution;",
     "",
     "  float r = (",
     "    texture2D(uBackground, uv + offR).r",
     "  + texture2D(uBackground, uv + offR + vec2( tx.x, 0.0)).r",
-    "  + texture2D(uBackground, uv + offR + vec2(-tx.x, 0.0)).r",
+    "  + texture2D(uBackground, uv + offR - vec2( tx.x, 0.0)).r",
     "  + texture2D(uBackground, uv + offR + vec2(0.0,  tx.y)).r",
-    "  + texture2D(uBackground, uv + offR + vec2(0.0, -tx.y)).r",
+    "  + texture2D(uBackground, uv + offR - vec2(0.0,  tx.y)).r",
     "  ) / 5.0;",
     "",
     "  float g = (",
     "    texture2D(uBackground, uv + offG).g",
     "  + texture2D(uBackground, uv + offG + vec2( tx.x, 0.0)).g",
-    "  + texture2D(uBackground, uv + offG + vec2(-tx.x, 0.0)).g",
+    "  + texture2D(uBackground, uv + offG - vec2( tx.x, 0.0)).g",
     "  + texture2D(uBackground, uv + offG + vec2(0.0,  tx.y)).g",
-    "  + texture2D(uBackground, uv + offG + vec2(0.0, -tx.y)).g",
+    "  + texture2D(uBackground, uv + offG - vec2(0.0,  tx.y)).g",
     "  ) / 5.0;",
     "",
     "  float b = (",
     "    texture2D(uBackground, uv + offB).b",
     "  + texture2D(uBackground, uv + offB + vec2( tx.x, 0.0)).b",
-    "  + texture2D(uBackground, uv + offB + vec2(-tx.x, 0.0)).b",
+    "  + texture2D(uBackground, uv + offB - vec2( tx.x, 0.0)).b",
     "  + texture2D(uBackground, uv + offB + vec2(0.0,  tx.y)).b",
-    "  + texture2D(uBackground, uv + offB + vec2(0.0, -tx.y)).b",
+    "  + texture2D(uBackground, uv + offB - vec2(0.0,  tx.y)).b",
     "  ) / 5.0;",
     "",
     "  vec3 color = vec3(r, g, b);",
     "",
-    // Fresnel reflection — brighten at grazing angles
+    // ── Fresnel — brighten at grazing angles ──
     "  float fresnel = pow(edge, 3.0);",
-    "  color = mix(color, vec3(1.0), fresnel * 0.12);",
+    "  color = mix(color, vec3(1.0), fresnel * 0.15);",
     "",
-    // Inner shadow at edges — adds perceived thickness
-    "  color *= mix(1.0, 0.88, edge * edge);",
+    // ── Inner shadow — perceived thickness ──
+    "  color *= mix(1.0, 0.85, edge * edge);",
     "",
-    // Animated specular highlights (liquidGL style)
-    "  vec2 lp1 = vec2(sin(uTime * 0.3), cos(uTime * 0.4)) * 0.4;",
-    "  vec2 lp2 = vec2(sin(uTime * -0.5 + 1.5), cos(uTime * 0.3 - 0.5)) * 0.4;",
+    // ── Animated specular (liquidGL style) ──
+    "  vec2 lp1 = vec2(sin(uTime * 0.25), cos(uTime * 0.35)) * 0.45;",
+    "  vec2 lp2 = vec2(sin(uTime * -0.4 + 1.5), cos(uTime * 0.2 - 0.5)) * 0.45;",
     "  float h = 0.0;",
-    "  h += smoothstep(0.6, 0.0, length(Nv.xy - lp1)) * 0.12;",
-    "  h += smoothstep(0.7, 0.0, length(Nv.xy - lp2)) * 0.09;",
+    "  h += smoothstep(0.55, 0.0, length(Nv.xy - lp1)) * 0.14;",
+    "  h += smoothstep(0.65, 0.0, length(Nv.xy - lp2)) * 0.10;",
     "  color += vec3(h);",
     "",
-    // Fixed specular (view-dependent)
+    // ── Fixed specular ──
     "  vec3 l1 = normalize(vec3(1.0, 2.0, 3.0));",
     "  vec3 h1 = normalize(V + l1);",
-    "  float s1 = pow(max(dot(Nw, h1), 0.0), 200.0);",
-    "  color += vec3(1.0) * s1 * 0.4;",
+    "  float s1 = pow(max(dot(Nw, h1), 0.0), 180.0);",
+    "  color += vec3(1.0) * s1 * 0.35;",
     "",
     "  gl_FragColor = vec4(color, 1.0);",
     "}",
@@ -229,6 +230,7 @@
       uBackground: { value: renderTarget.texture },
       uResolution: { value: new THREE.Vector2(rtW, rtH) },
       uTime: { value: 0.0 },
+      uCenter: { value: new THREE.Vector2(0.5, 0.5) },
     },
     vertexShader: glassVertSrc,
     fragmentShader: glassFragSrc,
@@ -249,7 +251,7 @@
   });
   var wireframe = new THREE.LineSegments(edgesGeo, edgesMat);
 
-  // ─── Hex Group — 3/4 starting angle like reference ────────
+  // ─── Hex Group ────────────────────────────────────────────
   var hexGroup = new THREE.Group();
   hexGroup.add(glassHex);
   hexGroup.add(wireframe);
@@ -317,12 +319,22 @@
 
   // ─── Render Loop ──────────────────────────────────────────
   var clock = new THREE.Clock();
+  var projVec = new THREE.Vector3();
 
   function animate() {
     requestAnimationFrame(animate);
 
     glassMat.uniforms.uTime.value = clock.getElapsedTime();
 
+    // Compute hex center in normalized screen coords for radial direction
+    hexGroup.getWorldPosition(projVec);
+    projVec.project(camera);
+    glassMat.uniforms.uCenter.value.set(
+      projVec.x * 0.5 + 0.5,
+      projVec.y * 0.5 + 0.5
+    );
+
+    // Billboard: video plane tracks hex, faces camera
     videoPlane.position.copy(hexGroup.position);
     videoPlane.scale.setScalar(hexGroup.scale.x);
     videoPlane.quaternion.copy(camera.quaternion);
@@ -331,9 +343,11 @@
       videoTexture.needsUpdate = true;
     }
 
+    // Pass 1 — video + white bg → FBO
     renderer.setRenderTarget(renderTarget);
     renderer.render(bgScene, camera);
 
+    // Pass 2 — glass hex (samples FBO with distortion) → screen
     renderer.setRenderTarget(null);
     renderer.render(mainScene, camera);
   }
