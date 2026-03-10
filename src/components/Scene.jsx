@@ -1,7 +1,6 @@
 import { Suspense } from "react";
 import { Environment } from "@react-three/drei";
 import GlassHex from "./GlassHex";
-import VideoPlane from "./VideoPlane";
 
 export default function Scene() {
   return (
@@ -13,7 +12,6 @@ export default function Scene() {
 
       <Suspense fallback={null}>
         <Environment preset="city" />
-        <VideoPlane />
         <GlassHex />
       </Suspense>
     </>
