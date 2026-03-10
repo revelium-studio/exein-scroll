@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
+import { Leva } from "leva";
 import Lenis from "lenis";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
@@ -37,6 +38,7 @@ export default function App() {
 
   return (
     <>
+      <Leva collapsed={false} flat titleBar={{ title: "Glass Controls" }} />
       <div className="canvas-wrapper">
         <Canvas
           camera={{ position: [0, 0, 5], fov: 45 }}

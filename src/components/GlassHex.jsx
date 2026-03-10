@@ -1,6 +1,7 @@
 import { useRef, useMemo, useEffect } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { useFBO } from "@react-three/drei";
+import { useControls, folder } from "leva";
 import * as THREE from "three";
 import { scrollState } from "../store";
 
@@ -22,8 +23,19 @@ const fragmentShader = /* glsl */ `
 uniform sampler2D uBuffer;
 uniform vec2      uResolution;
 uniform float     uTime;
+
 uniform float     uEdgeRefraction;
 uniform float     uEdgeCA;
+uniform float     uEdgeMaskStart;
+uniform float     uEdgeMaskEnd;
+uniform float     uBevelPower;
+uniform float     uBevelStrength;
+uniform float     uFresnelPower;
+uniform float     uFresnelIntensity;
+uniform float     uSpecPower;
+uniform float     uSpecIntensity;
+uniform float     uInnerShadow;
+uniform float     uPrismIntensity;
 
 varying vec3 vViewNormal;
 varying vec3 vWorldNormal;
@@ -38,40 +50,26 @@ void main() {
   Nw *= gl_FrontFacing ? 1.0 : -1.0;
   vec3 V = normalize(vViewDir);
 
-  // Edge factor: 0 when surface faces camera, 1 at grazing angle
   float edge = 1.0 - abs(dot(V, Nw));
 
-  // --- Edge-only distortion mask ---
-  // Center stays COMPLETELY clear; distortion fades in at edges only
-  float edgeMask = smoothstep(0.2, 0.8, edge);
+  float edgeMask = smoothstep(uEdgeMaskStart, uEdgeMaskEnd, edge);
+  float bevel = pow(edge, uBevelPower);
+  float totalMask = edgeMask + bevel * uBevelStrength;
 
-  // Bevel boost at extreme edges (liquid glass ridge)
-  float bevel = pow(edge, 5.0);
-  float totalMask = edgeMask + bevel * 1.5;
-
-  // Refraction direction from view-space normals
   vec2 dir = Nv.xy;
-
-  // Offset — zero in center, strong at edges
   float offset = totalMask * uEdgeRefraction;
-
-  // Chromatic aberration — edge-only
   float ca = totalMask * uEdgeCA;
 
-  // Sample video with per-channel offset (chromatic split)
   float r = texture2D(uBuffer, uv + dir * offset * (1.0 + ca)).r;
   float g = texture2D(uBuffer, uv + dir * offset).g;
   float b = texture2D(uBuffer, uv + dir * offset * (1.0 - ca)).b;
   vec3 color = vec3(r, g, b);
 
-  // Fresnel — subtle white reflection at edges
-  float fresnel = pow(edge, 3.5);
-  color = mix(color, vec3(1.0), fresnel * 0.18);
+  float fresnel = pow(edge, uFresnelPower);
+  color = mix(color, vec3(1.0), fresnel * uFresnelIntensity);
 
-  // Inner shadow — simulates glass thickness
-  color *= mix(1.0, 0.88, edgeMask * edgeMask);
+  color *= mix(1.0, 1.0 - uInnerShadow, edgeMask * edgeMask);
 
-  // Animated specular highlights (liquid movement feel)
   vec2 lp1 = vec2(sin(uTime * 0.3), cos(uTime * 0.4)) * 0.5;
   vec2 lp2 = vec2(cos(uTime * -0.35 + 1.5), sin(uTime * 0.25)) * 0.5;
   float h = 0.0;
@@ -79,20 +77,18 @@ void main() {
   h += smoothstep(0.65, 0.0, length(Nv.xy - lp2)) * 0.07;
   color += vec3(h);
 
-  // Fixed specular
   vec3 L1 = normalize(vec3(1.0, 2.0, 3.0));
   vec3 H1 = normalize(V + L1);
-  float s1 = pow(max(dot(Nw, H1), 0.0), 220.0);
-  color += s1 * 0.30;
+  float s1 = pow(max(dot(Nw, H1), 0.0), uSpecPower);
+  color += s1 * uSpecIntensity;
 
-  // Prismatic tint at extreme edges (dispersion simulation)
   float prism = smoothstep(0.55, 1.0, edge);
   vec3 rainbow = vec3(
     0.5 + 0.5 * sin(edge * 6.28),
     0.5 + 0.5 * sin(edge * 6.28 + 2.09),
     0.5 + 0.5 * sin(edge * 6.28 + 4.18)
   );
-  color = mix(color, rainbow, prism * 0.06);
+  color = mix(color, rainbow, prism * uPrismIntensity);
 
   gl_FragColor = vec4(color, 1.0);
 }
@@ -101,9 +97,32 @@ void main() {
 export default function GlassHex() {
   const groupRef = useRef();
   const videoMeshRef = useRef();
-  const { gl, camera, size, viewport } = useThree();
+  const { gl, camera, size } = useThree();
 
   const fbo = useFBO();
+
+  const controls = useControls({
+    "Edge Refraction": folder({
+      edgeRefraction: { value: 0.10, min: 0, max: 0.5, step: 0.005, label: "Strength" },
+      scrollRefractionBoost: { value: 0.20, min: 0, max: 0.6, step: 0.01, label: "Scroll Boost" },
+      edgeCA: { value: 0.025, min: 0, max: 0.15, step: 0.005, label: "Chromatic Aberration" },
+      scrollCABoost: { value: 0.05, min: 0, max: 0.2, step: 0.005, label: "Scroll CA Boost" },
+    }),
+    "Edge Mask": folder({
+      edgeMaskStart: { value: 0.15, min: 0, max: 0.5, step: 0.01, label: "Start" },
+      edgeMaskEnd: { value: 0.75, min: 0.3, max: 1.0, step: 0.01, label: "End" },
+      bevelPower: { value: 4.0, min: 1, max: 12, step: 0.5, label: "Bevel Power" },
+      bevelStrength: { value: 2.0, min: 0, max: 5, step: 0.1, label: "Bevel Strength" },
+    }),
+    "Glass Look": folder({
+      fresnelPower: { value: 3.0, min: 1, max: 8, step: 0.1, label: "Fresnel Power" },
+      fresnelIntensity: { value: 0.20, min: 0, max: 0.6, step: 0.01, label: "Fresnel Intensity" },
+      specPower: { value: 200, min: 10, max: 500, step: 10, label: "Specular Power" },
+      specIntensity: { value: 0.35, min: 0, max: 1.0, step: 0.01, label: "Specular Intensity" },
+      innerShadow: { value: 0.12, min: 0, max: 0.4, step: 0.01, label: "Inner Shadow" },
+      prismIntensity: { value: 0.06, min: 0, max: 0.3, step: 0.01, label: "Prismatic Tint" },
+    }),
+  });
 
   const videoScene = useMemo(() => {
     const s = new THREE.Scene();
@@ -118,8 +137,18 @@ export default function GlassHex() {
           uBuffer: { value: null },
           uResolution: { value: new THREE.Vector2(1, 1) },
           uTime: { value: 0 },
-          uEdgeRefraction: { value: 0.04 },
-          uEdgeCA: { value: 0.012 },
+          uEdgeRefraction: { value: 0.10 },
+          uEdgeCA: { value: 0.025 },
+          uEdgeMaskStart: { value: 0.15 },
+          uEdgeMaskEnd: { value: 0.75 },
+          uBevelPower: { value: 4.0 },
+          uBevelStrength: { value: 2.0 },
+          uFresnelPower: { value: 3.0 },
+          uFresnelIntensity: { value: 0.20 },
+          uSpecPower: { value: 200.0 },
+          uSpecIntensity: { value: 0.35 },
+          uInnerShadow: { value: 0.12 },
+          uPrismIntensity: { value: 0.06 },
         },
         vertexShader,
         fragmentShader,
@@ -190,10 +219,22 @@ export default function GlassHex() {
     gl.render(videoScene, camera);
     gl.setRenderTarget(null);
 
-    glassMat.uniforms.uBuffer.value = fbo.texture;
-    glassMat.uniforms.uTime.value = clock.getElapsedTime();
-    glassMat.uniforms.uEdgeRefraction.value = 0.04 + p * 0.12;
-    glassMat.uniforms.uEdgeCA.value = 0.012 + p * 0.035;
+    const u = glassMat.uniforms;
+    u.uBuffer.value = fbo.texture;
+    u.uTime.value = clock.getElapsedTime();
+
+    u.uEdgeRefraction.value = controls.edgeRefraction + p * controls.scrollRefractionBoost;
+    u.uEdgeCA.value = controls.edgeCA + p * controls.scrollCABoost;
+    u.uEdgeMaskStart.value = controls.edgeMaskStart;
+    u.uEdgeMaskEnd.value = controls.edgeMaskEnd;
+    u.uBevelPower.value = controls.bevelPower;
+    u.uBevelStrength.value = controls.bevelStrength;
+    u.uFresnelPower.value = controls.fresnelPower;
+    u.uFresnelIntensity.value = controls.fresnelIntensity;
+    u.uSpecPower.value = controls.specPower;
+    u.uSpecIntensity.value = controls.specIntensity;
+    u.uInnerShadow.value = controls.innerShadow;
+    u.uPrismIntensity.value = controls.prismIntensity;
   });
 
   return (
