@@ -53,13 +53,19 @@
   videoTexture.format = THREE.RGBAFormat;
   videoTexture.encoding = THREE.sRGBEncoding;
 
-  // ─── Geometry ───────────────────────────────────────────────
-  var cubeSize = 1.8;
-  var cubeGeo = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
+  // ─── Hexagonal Prism Geometry ───────────────────────────────
+  var hexRadius = 1.0;
+  var hexDepth = 1.0;
+  var hexGeo = new THREE.CylinderGeometry(hexRadius, hexRadius, hexDepth, 6);
+  hexGeo.rotateX(Math.PI / 2);
+
+  // Max projected extent of the hex at any rotation ≈ space diagonal
+  // = sqrt((2r)^2 + depth^2) ≈ sqrt(4 + 1) ≈ 2.24
+  // Video plane sized just above that so it always covers the mask.
+  var videoPlaneSize = 2.4;
 
   // ═══════════════════════════════════════════════════════════
-  // PASS 1 — Stencil cube: invisible, writes 1 to stencil buffer
-  // wherever the cube's front faces project on screen.
+  // PASS 1 — Stencil hexagon: invisible, writes 1 to stencil
   // ═══════════════════════════════════════════════════════════
   var stencilMat = new THREE.MeshBasicMaterial();
   stencilMat.colorWrite = false;
@@ -71,13 +77,13 @@
   stencilMat.stencilFail = THREE.KeepStencilOp;
   stencilMat.stencilZFail = THREE.KeepStencilOp;
 
-  var stencilCube = new THREE.Mesh(cubeGeo, stencilMat);
-  stencilCube.renderOrder = 0;
+  var stencilHex = new THREE.Mesh(hexGeo, stencilMat);
+  stencilHex.renderOrder = 0;
 
   // ═══════════════════════════════════════════════════════════
-  // PASS 2 — Video plane: a billboard quad that always faces the
-  // camera. Only renders where stencil === 1, so the video is
-  // perfectly masked to the cube's silhouette.
+  // PASS 2 — Video plane: billboard quad, masked by stencil.
+  // Sized to tightly cover the hexagon's max projected extent
+  // so the video fills the shape without being zoomed in.
   // ═══════════════════════════════════════════════════════════
   var videoMat = new THREE.MeshBasicMaterial({ map: videoTexture });
   videoMat.depthTest = false;
@@ -90,15 +96,14 @@
   videoMat.stencilZPass = THREE.KeepStencilOp;
 
   var videoPlane = new THREE.Mesh(
-    new THREE.PlaneGeometry(cubeSize * 2.5, cubeSize * 2.5),
+    new THREE.PlaneGeometry(videoPlaneSize, videoPlaneSize),
     videoMat
   );
   videoPlane.renderOrder = 1;
   videoPlane.frustumCulled = false;
 
   // ═══════════════════════════════════════════════════════════
-  // PASS 3 — Glass cube: transparent shell with fresnel-based
-  // reflections and specular highlights for a realistic glass look.
+  // PASS 3 — Glass hexagon: fresnel reflections + specular
   // ═══════════════════════════════════════════════════════════
   var glassVert = [
     "varying vec3 vNormal;",
@@ -147,13 +152,13 @@
     side: THREE.DoubleSide,
   });
 
-  var glassCube = new THREE.Mesh(cubeGeo, glassMat);
-  glassCube.renderOrder = 2;
+  var glassHex = new THREE.Mesh(hexGeo, glassMat);
+  glassHex.renderOrder = 2;
 
   // ═══════════════════════════════════════════════════════════
   // PASS 4 — Wireframe edges
   // ═══════════════════════════════════════════════════════════
-  var edgesGeo = new THREE.EdgesGeometry(cubeGeo);
+  var edgesGeo = new THREE.EdgesGeometry(hexGeo);
   var edgesMat = new THREE.LineBasicMaterial({
     color: 0xffffff,
     transparent: true,
@@ -163,11 +168,11 @@
   wireframe.renderOrder = 3;
 
   // ─── Assemble Scene ─────────────────────────────────────────
-  var cubeGroup = new THREE.Group();
-  cubeGroup.add(stencilCube);
-  cubeGroup.add(glassCube);
-  cubeGroup.add(wireframe);
-  scene.add(cubeGroup);
+  var hexGroup = new THREE.Group();
+  hexGroup.add(stencilHex);
+  hexGroup.add(glassHex);
+  hexGroup.add(wireframe);
+  scene.add(hexGroup);
   scene.add(videoPlane);
 
   // ─── GSAP ScrollTrigger ─────────────────────────────────────
@@ -181,7 +186,7 @@
       end: "bottom bottom",
       scrub: 1.5,
     },
-  }).to(cubeGroup.rotation, {
+  }).to(hexGroup.rotation, {
     x: Math.PI * 2,
     y: Math.PI * 4,
     duration: 1,
@@ -197,7 +202,7 @@
       scrub: 1.5,
     },
   }).fromTo(
-    cubeGroup.scale,
+    hexGroup.scale,
     { x: 1, y: 1, z: 1 },
     { x: 1.4, y: 1.4, z: 1.4, duration: 1, ease: "none" }
   );
@@ -212,10 +217,10 @@
     },
   });
   tlPos
-    .to(cubeGroup.position, { x: 1.2, y: 0.5, duration: 0.25, ease: "none" }, 0)
-    .to(cubeGroup.position, { x: -0.8, y: -0.3, duration: 0.25, ease: "none" }, 0.25)
-    .to(cubeGroup.position, { x: 0.5, y: 0.8, duration: 0.25, ease: "none" }, 0.5)
-    .to(cubeGroup.position, { x: 0, y: 0, duration: 0.25, ease: "none" }, 0.75);
+    .to(hexGroup.position, { x: 1.2, y: 0.5, duration: 0.25, ease: "none" }, 0)
+    .to(hexGroup.position, { x: -0.8, y: -0.3, duration: 0.25, ease: "none" }, 0.25)
+    .to(hexGroup.position, { x: 0.5, y: 0.8, duration: 0.25, ease: "none" }, 0.5)
+    .to(hexGroup.position, { x: 0, y: 0, duration: 0.25, ease: "none" }, 0.75);
 
   // Edge brightness pulse
   var tlEdges = gsap.timeline({
@@ -234,9 +239,8 @@
   function animate() {
     requestAnimationFrame(animate);
 
-    // Billboard: keep video plane centred on cube, facing camera
-    videoPlane.position.copy(cubeGroup.position);
-    videoPlane.scale.setScalar(cubeGroup.scale.x);
+    videoPlane.position.copy(hexGroup.position);
+    videoPlane.scale.setScalar(hexGroup.scale.x);
     videoPlane.quaternion.copy(camera.quaternion);
 
     if (video.readyState >= video.HAVE_CURRENT_DATA) {
