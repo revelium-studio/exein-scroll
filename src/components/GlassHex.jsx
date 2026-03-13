@@ -6,17 +6,11 @@ import * as THREE from "three";
 import { scrollState } from "../store";
 
 const vertexShader = /* glsl */ `
-varying vec3 vObjPos;
-varying vec3 vObjNormal;
-varying vec3 vViewNormal;
 varying vec3 vWorldNormal;
 varying vec3 vViewDir;
 
 void main() {
-  vObjPos      = position;
-  vObjNormal   = normal;
   vec4 worldPos = modelMatrix * vec4(position, 1.0);
-  vViewNormal  = normalize(normalMatrix * normal);
   vWorldNormal = normalize(mat3(modelMatrix) * normal);
   vViewDir     = normalize(cameraPosition - worldPos.xyz);
   gl_Position  = projectionMatrix * viewMatrix * worldPos;
@@ -26,79 +20,51 @@ void main() {
 const fragmentShader = /* glsl */ `
 uniform sampler2D uBuffer;
 uniform vec2      uResolution;
-uniform float     uTime;
-uniform vec2      uHexCenter;
-uniform float     uHexRadius;
-uniform float     uHexHalfH;
-uniform float     uBorderRadius;
+uniform float     uIorR;
+uniform float     uIorG;
+uniform float     uIorB;
 uniform float     uRefraction;
-uniform float     uCA;
+uniform float     uFresnelPower;
 uniform float     uFresnelIntensity;
-uniform float     uSpecPower;
+uniform float     uSaturation;
 uniform float     uSpecIntensity;
+uniform float     uSpecPower;
 
-varying vec3 vObjPos;
-varying vec3 vObjNormal;
-varying vec3 vViewNormal;
 varying vec3 vWorldNormal;
 varying vec3 vViewDir;
-
-float hexDist(vec2 p, float r) {
-  float ir = r * 0.866025404;
-  p = abs(p);
-  return max(dot(p, vec2(0.866025404, 0.5)), p.y) - ir;
-}
 
 void main() {
   vec2 uv = gl_FragCoord.xy / uResolution;
 
-  // --- SDF edge detection on the hex surface ---
-  float dHex = -hexDist(vObjPos.xz, uHexRadius);
-  float dCap = uHexHalfH - abs(vObjPos.y);
-  float capFactor = abs(normalize(vObjNormal).y);
-  float surfDist = mix(max(dCap, 0.0), max(dHex, 0.0), capFactor);
+  vec3 normal = normalize(vWorldNormal);
+  normal *= gl_FrontFacing ? 1.0 : -1.0;
+  vec3 V = normalize(vViewDir);
 
-  // Edge mask: 1 at edge, 0 in center
-  float edgeMask = 1.0 - smoothstep(0.0, uBorderRadius, surfDist);
+  // Diamond-style refraction: Snell's law with different IOR per channel
+  vec3 refR = refract(-V, normal, 1.0 / uIorR);
+  vec3 refG = refract(-V, normal, 1.0 / uIorG);
+  vec3 refB = refract(-V, normal, 1.0 / uIorB);
 
-  // --- Radial refraction direction (lens effect) ---
-  vec2 radial = uv - uHexCenter;
-  float radialLen = length(radial);
-  vec2 radialDir = radialLen > 0.001 ? radial / radialLen : vec2(0.0);
+  float r = texture2D(uBuffer, uv + refR.xy * uRefraction).r;
+  float g = texture2D(uBuffer, uv + refG.xy * uRefraction).g;
+  float b = texture2D(uBuffer, uv + refB.xy * uRefraction).b;
 
-  vec2 offset = radialDir * edgeMask * uRefraction;
-
-  // Chromatic aberration — split R/G/B at edges
-  float ca = uCA * edgeMask;
-  float r = texture2D(uBuffer, uv + offset * (1.0 + ca)).r;
-  float g = texture2D(uBuffer, uv + offset).g;
-  float b = texture2D(uBuffer, uv + offset * (1.0 - ca)).b;
   vec3 color = vec3(r, g, b);
 
-  // Fresnel — white glow at edges
-  vec3 Nw = normalize(vWorldNormal);
-  Nw *= gl_FrontFacing ? 1.0 : -1.0;
-  vec3 V = normalize(vViewDir);
-  float edge = 1.0 - abs(dot(V, Nw));
-  float fresnel = pow(edge, 3.5);
-  color = mix(color, vec3(1.0), fresnel * uFresnelIntensity * edgeMask);
+  // Fresnel — edge glow
+  float cosTheta = max(dot(V, normal), 0.0);
+  float fresnel = pow(1.0 - cosTheta, uFresnelPower);
+  color = mix(color, vec3(1.0), fresnel * uFresnelIntensity);
 
-  // Inner shadow at edges
-  color *= mix(1.0, 0.88, edgeMask * edgeMask);
-
-  // Animated specular highlights
-  vec2 Nv = normalize(vViewNormal).xy;
-  vec2 lp1 = vec2(sin(uTime * 0.3), cos(uTime * 0.4)) * 0.5;
-  vec2 lp2 = vec2(cos(uTime * -0.35 + 1.5), sin(uTime * 0.25)) * 0.5;
-  float h = smoothstep(0.55, 0.0, length(Nv - lp1)) * 0.08;
-  h += smoothstep(0.65, 0.0, length(Nv - lp2)) * 0.06;
-  color += vec3(h);
-
-  // Fixed specular
+  // Specular highlight
   vec3 L = normalize(vec3(1.0, 2.0, 3.0));
   vec3 H = normalize(V + L);
-  float spec = pow(max(dot(Nw, H), 0.0), uSpecPower);
+  float spec = pow(max(dot(normal, H), 0.0), uSpecPower);
   color += spec * uSpecIntensity;
+
+  // Saturation control
+  float lum = dot(color, vec3(0.299, 0.587, 0.114));
+  color = mix(vec3(lum), color, uSaturation);
 
   gl_FragColor = vec4(color, 1.0);
 }
@@ -107,27 +73,24 @@ void main() {
 export default function GlassHex() {
   const groupRef = useRef();
   const videoMeshRef = useRef();
-  const projVec = useRef(new THREE.Vector3());
   const { gl, camera, size } = useThree();
 
   const fbo = useFBO();
 
-  const hexRadius = 0.9;
-  const hexDepth = 1.4;
-  const hexHalfH = hexDepth / 2;
-
   const controls = useControls({
-    "Liquid Glass": folder({
-      borderRadius: { value: 0.25, min: 0.02, max: 0.8, step: 0.01, label: "Bevel Roundness" },
-      refraction: { value: 0.12, min: 0, max: 0.5, step: 0.005, label: "Refraction" },
-      scrollRefractionBoost: { value: 0.20, min: 0, max: 0.6, step: 0.01, label: "Scroll Boost" },
-      chromaticAberration: { value: 0.4, min: 0, max: 2.0, step: 0.05, label: "Chromatic Aberr." },
-      scrollCABoost: { value: 0.5, min: 0, max: 2.0, step: 0.05, label: "Scroll CA+" },
+    "Refraction": folder({
+      iorR: { value: 1.16, min: 1.0, max: 2.5, step: 0.01, label: "IOR Red" },
+      iorG: { value: 1.22, min: 1.0, max: 2.5, step: 0.01, label: "IOR Green" },
+      iorB: { value: 1.30, min: 1.0, max: 2.5, step: 0.01, label: "IOR Blue" },
+      refraction: { value: 0.45, min: 0, max: 1.5, step: 0.01, label: "Strength" },
+      scrollBoost: { value: 0.35, min: 0, max: 1.0, step: 0.01, label: "Scroll +" },
     }),
-    "Glass Look": folder({
-      fresnelIntensity: { value: 0.25, min: 0, max: 1.0, step: 0.01, label: "Fresnel" },
+    "Glass": folder({
+      fresnelPower: { value: 3.0, min: 1, max: 8, step: 0.1, label: "Fresnel Power" },
+      fresnelIntensity: { value: 0.25, min: 0, max: 1.0, step: 0.01, label: "Fresnel Intensity" },
       specPower: { value: 200, min: 10, max: 500, step: 10, label: "Specular Sharpness" },
-      specIntensity: { value: 0.25, min: 0, max: 1.0, step: 0.01, label: "Specular Brightness" },
+      specIntensity: { value: 0.20, min: 0, max: 1.0, step: 0.01, label: "Specular Brightness" },
+      saturation: { value: 1.15, min: 0.5, max: 2.0, step: 0.05, label: "Saturation" },
     }),
   });
 
@@ -137,16 +100,15 @@ export default function GlassHex() {
         uniforms: {
           uBuffer: { value: null },
           uResolution: { value: new THREE.Vector2(1, 1) },
-          uTime: { value: 0 },
-          uHexCenter: { value: new THREE.Vector2(0.5, 0.5) },
-          uHexRadius: { value: hexRadius },
-          uHexHalfH: { value: hexHalfH },
-          uBorderRadius: { value: 0.25 },
-          uRefraction: { value: 0.12 },
-          uCA: { value: 0.4 },
+          uIorR: { value: 1.16 },
+          uIorG: { value: 1.22 },
+          uIorB: { value: 1.30 },
+          uRefraction: { value: 0.45 },
+          uFresnelPower: { value: 3.0 },
           uFresnelIntensity: { value: 0.25 },
           uSpecPower: { value: 200.0 },
-          uSpecIntensity: { value: 0.25 },
+          uSpecIntensity: { value: 0.20 },
+          uSaturation: { value: 1.15 },
         },
         vertexShader,
         fragmentShader,
@@ -177,7 +139,7 @@ export default function GlassHex() {
     tex.minFilter = THREE.LinearFilter;
     tex.magFilter = THREE.LinearFilter;
 
-    const geo = new THREE.PlaneGeometry(3.5, 3.5);
+    const geo = new THREE.PlaneGeometry(5, 5);
     const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
     const mesh = new THREE.Mesh(geo, mat);
     videoScene.add(mesh);
@@ -200,7 +162,7 @@ export default function GlassHex() {
     );
   }, [size, gl, glassMat]);
 
-  useFrame(({ clock }) => {
+  useFrame(() => {
     const p = scrollState.progress;
 
     if (groupRef.current) {
@@ -219,29 +181,21 @@ export default function GlassHex() {
       videoMeshRef.current.quaternion.copy(camera.quaternion);
     }
 
-    // Compute hex center in screen-space for radial refraction
-    if (groupRef.current) {
-      groupRef.current.getWorldPosition(projVec.current);
-      projVec.current.project(camera);
-      glassMat.uniforms.uHexCenter.value.set(
-        projVec.current.x * 0.5 + 0.5,
-        projVec.current.y * 0.5 + 0.5
-      );
-    }
-
     gl.setRenderTarget(fbo);
     gl.render(videoScene, camera);
     gl.setRenderTarget(null);
 
     const u = glassMat.uniforms;
     u.uBuffer.value = fbo.texture;
-    u.uTime.value = clock.getElapsedTime();
-    u.uBorderRadius.value = controls.borderRadius;
-    u.uRefraction.value = controls.refraction + p * controls.scrollRefractionBoost;
-    u.uCA.value = controls.chromaticAberration + p * controls.scrollCABoost;
+    u.uIorR.value = controls.iorR;
+    u.uIorG.value = controls.iorG;
+    u.uIorB.value = controls.iorB;
+    u.uRefraction.value = controls.refraction + p * controls.scrollBoost;
+    u.uFresnelPower.value = controls.fresnelPower;
     u.uFresnelIntensity.value = controls.fresnelIntensity;
     u.uSpecPower.value = controls.specPower;
     u.uSpecIntensity.value = controls.specIntensity;
+    u.uSaturation.value = controls.saturation;
   });
 
   return (

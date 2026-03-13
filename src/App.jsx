@@ -42,7 +42,8 @@ export default function App() {
       <div className="canvas-wrapper">
         <Canvas
           camera={{ position: [0, 0, 5], fov: 45 }}
-          gl={{ antialias: true, alpha: false }}
+          dpr={[1, 1.5]}
+          gl={{ antialias: true, alpha: false, powerPreference: "high-performance" }}
           onCreated={({ gl }) => gl.setClearColor("#ffffff")}
         >
           <Scene />
