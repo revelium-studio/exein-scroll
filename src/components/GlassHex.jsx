@@ -65,6 +65,9 @@ export default function GlassHex() {
   const fbo = useFBO();
 
   const controls = useControls({
+    "Video": folder({
+      videoScale: { value: 1.0, min: 0.3, max: 3.0, step: 0.05, label: "Scale" },
+    }),
     "Glass": folder({
       ior: { value: 1.3, min: 1.0, max: 2.5, step: 0.01, label: "IOR" },
       refraction: { value: 0.15, min: 0, max: 1.0, step: 0.005, label: "Refraction" },
@@ -116,7 +119,7 @@ export default function GlassHex() {
     tex.minFilter = THREE.LinearFilter;
     tex.magFilter = THREE.LinearFilter;
 
-    const geo = new THREE.PlaneGeometry(5, 5);
+    const geo = new THREE.PlaneGeometry(3, 3);
     const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
     const mesh = new THREE.Mesh(geo, mat);
     videoScene.add(mesh);
@@ -154,7 +157,7 @@ export default function GlassHex() {
 
     if (videoMeshRef.current && groupRef.current) {
       videoMeshRef.current.position.copy(groupRef.current.position);
-      videoMeshRef.current.scale.setScalar(groupRef.current.scale.x);
+      videoMeshRef.current.scale.setScalar(groupRef.current.scale.x * controls.videoScale);
       videoMeshRef.current.quaternion.copy(camera.quaternion);
     }
 
